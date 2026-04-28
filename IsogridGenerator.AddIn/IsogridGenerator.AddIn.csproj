@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <LangVersion>8.0</LangVersion>
+    <Nullable>enable</Nullable>
+    <OutputType>Library</OutputType>
+    <AssemblyName>IsogridGenerator.AddIn</AssemblyName>
+    <RootNamespace>IsogridGenerator.AddIn</RootNamespace>
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <FileVersion>1.0.0.0</FileVersion>
+    <AssemblyTitle>Isogrid Generator</AssemblyTitle>
+    <Product>Isogrid Generator</Product>
+    <Description>SolidWorks add-in for generating parametric isogrid patterns on selected faces</Description>
+    <Company>University of Bath</Company>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="CADBooster.SolidDna" Version="4.0.0" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\IsogridGenerator.Core\IsogridGenerator.Core.csproj" />
+    <ProjectReference Include="..\IsogridGenerator.SW\IsogridGenerator.SW.csproj" />
+    <ProjectReference Include="..\IsogridGenerator.UI\IsogridGenerator.UI.csproj" />
+  </ItemGroup>
+  <!--
+    Post-build: register the add-in with SolidWorks.
+    Run VS as Administrator for this to succeed, or run manually once per machine.
+    Uses 64-bit regasm — do NOT use Framework (32-bit) path.
+  -->
+  <Target Name="RegisterAddIn" AfterTargets="Build">
+    <Exec Command="&quot;C:\Windows\Microsoft.NET\Framework64\v4.0.30319\RegAsm.exe&quot; /codebase &quot;$(TargetPath)&quot;" ContinueOnError="true" />
+  </Target>
+</Project>
