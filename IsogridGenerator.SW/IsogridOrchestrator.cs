@@ -14,6 +14,25 @@ namespace IsogridGenerator.SW
     public class IsogridOrchestrator
     {
         /// <summary>
+        /// Builds a temporary wire body showing the isogrid pocket outlines on the face
+        /// and returns a <see cref="LivePreview"/> that keeps the body visible in the
+        /// viewport for as long as it is alive. Dispose the result to clear the preview.
+        /// Does not create any sketch or feature in the model tree.
+        /// </summary>
+        public LivePreview? BuildPreview(ISldWorks swApp, IModelDoc2 doc, IFace2 face, IsogridParameters p)
+        {
+            var surfaceType = FaceAnalyzer.Identify(face);
+            var bounds      = GetBounds(face, surfaceType);
+            var strategy    = CreateStrategy(surfaceType, face);
+            var pockets     = strategy.GeneratePockets(bounds, p);
+
+            var bodies = PreviewBuilder.Build(swApp, face, pockets, bounds.OffsetX, bounds.OffsetY);
+            if (bodies.Count == 0) return null;
+
+            return new LivePreview(bodies, doc);
+        }
+
+        /// <summary>
         /// Generates the pocket grid and draws it as a sketch on the face, but does not
         /// create a cut feature. The returned sketch feature shows the "area to be cut"
         /// as yellow contour lines — fast, non-destructive preview.

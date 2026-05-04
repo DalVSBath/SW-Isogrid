@@ -14,19 +14,19 @@ namespace IsogridGenerator.UI
     /// UX flow
     /// -------
     ///   1. User opens the page and selects a planar face.
-    ///   2. User clicks "Preview Grid" — a read-only sketch is drawn on the face so the
-    ///      grid can be reviewed in the viewport.  The sketch is deleted automatically
-    ///      when the page closes (OK or Cancel).
-    ///   3. User adjusts parameters and can re-click Preview at any time.
-    ///   4. OK → preview sketch removed, final sketch + cut feature created.
-    ///   5. Cancel → preview sketch removed, no feature created.
+    ///   2. An orange wire-body preview appears in the viewport immediately on face selection,
+    ///      showing where all the pockets will be cut.  No feature-tree entry is created.
+    ///   3. User adjusts parameters and clicks "Update Preview" to refresh.
+    ///   4. OK → preview cleared, final sketch + cut feature created.
+    ///   5. Cancel → preview cleared, no feature created.
     ///
     /// Preview implementation
     /// ----------------------
-    ///   DrawPreview() creates a SolidWorks sketch directly on the selected face using
-    ///   the same UV-offset + pocket logic used by the final cut, then closes the sketch
-    ///   so it appears as a visible overlay in the model tree (named "IsogridPreview").
-    ///   ClearPreview() removes it via EditUndo so it leaves no trace.
+    ///   DrawPreview() calls IsogridOrchestrator.BuildPreview() which builds a temporary
+    ///   wire body via IModeler.CreateWireBody, colours it orange via MaterialPropertyValues2,
+    ///   and renders it with IBody2.Display3.  LivePreview subscribes to ModelView.BufferSwapNotify
+    ///   so the body survives view rotations.  ClearPreview() disposes the LivePreview, which
+    ///   unsubscribes the event and forces a graphics redraw so the body vanishes.
     /// </summary>
     public class IsogridPropertyManagerPage : IPropertyManagerPage2Handler9
     {
@@ -39,7 +39,7 @@ namespace IsogridGenerator.UI
         private const int IdBoxR           = 44;
         private const int IdPreviewButton  = 50;
 
-        private IPropertyManagerPage2?       _page;
+        private IPropertyManagerPage2?           _page;
         private IPropertyManagerPageSelectionbox? _faceSelection;
         private IPropertyManagerPageNumberbox?    _boxA, _boxB, _boxD, _boxT, _boxR;
 
@@ -48,10 +48,8 @@ namespace IsogridGenerator.UI
         // HandleOk() has a chance to read it.
         private bool _isClosing;
 
-        // Real cut feature shown as the preview.  Null when no preview is active.
-        // On OK the reference is nulled (feature kept).  On Cancel or re-preview the
-        // feature is deleted from the tree.
-        private IFeature? _previewFeature;
+        // Live orange wire-body preview.  Null when no preview is active.
+        private LivePreview? _preview;
 
         private readonly ISldWorks   _swApp;
         private readonly IModelDoc2  _doc;
@@ -106,7 +104,7 @@ namespace IsogridGenerator.UI
             // ── Number boxes (values entered in mm) ──────────────────────────────
             _boxA = AddNumberBox(IdBoxA,
                 "Edge length A (mm)",
-                "Equilateral triangle edge length. Typical range: 10\u201350 mm.",
+                "Equilateral triangle edge length. Typical range: 10–50 mm.",
                 _inputs.A_mm, 0.5, 500.0);
 
             _boxB = AddNumberBox(IdBoxB,
@@ -129,15 +127,14 @@ namespace IsogridGenerator.UI
                 "Internal fillet radius at triangle corners. Enter 0 for sharp corners.",
                 _inputs.R_mm, 0.0, 50.0);
 
-            // ── Preview button ────────────────────────────────────────────────────
+            // ── Update preview button ─────────────────────────────────────────────
             _page.AddControl2(
                 IdPreviewButton,
                 (short)swPropertyManagerPageControlType_e.swControlType_Button,
-                "Preview Grid",
+                "Update Preview",
                 indent,
                 enabled,
-                "Draw the isogrid sketch on the selected face so you can review the layout " +
-                "before committing the cut. Click again after changing parameters to refresh.");
+                "Refresh the orange isogrid preview after changing parameters.");
         }
 
         private IPropertyManagerPageNumberbox AddNumberBox(
@@ -172,9 +169,9 @@ namespace IsogridGenerator.UI
 
         /// <summary>
         /// Builds a temporary wire body from the isogrid pocket edges and displays it
-        /// in the viewport using the same orange-yellow colour SolidWorks uses for its
-        /// own feature previews.  The body lives only in memory — it has no feature-tree
-        /// entry and does not dirty the undo stack.
+        /// in the viewport using the same orange colour SolidWorks uses for its own feature
+        /// previews.  The body lives only in memory — it has no feature-tree entry and
+        /// does not dirty the undo stack.
         /// </summary>
         private void DrawPreview()
         {
@@ -190,51 +187,43 @@ namespace IsogridGenerator.UI
             try
             {
                 var orchestrator = new IsogridOrchestrator();
-                _previewFeature  = orchestrator.RunSketchOnly(_doc, _inputs.SelectedFace, _inputs.ToSiParameters());
-
-                if (_previewFeature != null)
-                {
-                    // Rename so the user can see it's a preview.  On OK we rename back
-                    // to "Isogrid Generator".
-                    _previewFeature.Name = "Isogrid Generator (Preview)";
-                    _doc.ClearSelection2(true);
-                    _doc.GraphicsRedraw2();
-                }
+                _preview = orchestrator.BuildPreview(_swApp, _doc, _inputs.SelectedFace, _inputs.ToSiParameters());
+                if (_preview == null)
+                    MessageBox.Show("Preview body was null (wire body creation returned nothing).",
+                        "Isogrid Preview Debug", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                else
+                    MessageBox.Show($"LivePreview created. Bodies: {_preview.BodyCount}, First edge count: {_preview.EdgeCount}, IsTemp: {_preview.IsTemp}",
+                        "Isogrid Preview Debug", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
-            catch
+            catch (Exception ex)
             {
-                // On any error skip the preview — do not disturb the PMP.
-                _previewFeature = null;
+                _preview = null;
+                MessageBox.Show($"Preview failed:\n{ex.GetType().Name}: {ex.Message}\n\n{ex.StackTrace}",
+                    "Isogrid Preview Debug", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
 
         /// <summary>
-        /// Deletes the preview feature (and its absorbed sketch) from the tree.
+        /// Removes the preview wire body from the viewport.
         /// Safe to call when no preview is active.
         /// </summary>
         private void ClearPreview()
         {
-            if (_previewFeature == null) return;
-            try
-            {
-                _doc.ClearSelection2(true);
-                if (_previewFeature.Select2(false, 0))
-                    _doc.Extension.DeleteSelection2(
-                        (int)swDeleteSelectionOptions_e.swDelete_Absorbed);
-            }
-            catch { }
-            finally
-            {
-                _previewFeature = null;
-                try { _doc.GraphicsRedraw2(); } catch { }
-            }
+            _preview?.Dispose();
+            _preview = null;
         }
 
         // ── IPropertyManagerPage2Handler9 callbacks ──────────────────────────────
 
         public void AfterActivation() { }
 
-        public void AfterClose() { }
+        public void AfterClose()
+        {
+            ClearPreview();
+            // Second redraw once the page is fully gone — the GraphicsRedraw2 inside
+            // Dispose may be suppressed when called from within a PMP callback.
+            try { _doc.GraphicsRedraw2(); } catch { }
+        }
 
         public bool OnHelp() => false;
 
@@ -256,7 +245,7 @@ namespace IsogridGenerator.UI
             if (reason == (int)swPropertyManagerPageCloseReasons_e.swPropertyManagerPageClose_Okay)
                 HandleOk();
             else
-                ClearPreview();   // Cancel → remove preview feature
+                ClearPreview();   // Cancel → remove preview
         }
 
         public void OnWhatsNew() { }
@@ -361,6 +350,8 @@ namespace IsogridGenerator.UI
                     if (selMgr.GetSelectedObject6(i, -1) is IFace2 face)
                     {
                         _inputs.SelectedFace = face;
+                        if (!_isClosing)
+                            DrawPreview();
                         return;
                     }
                 }
@@ -412,37 +403,14 @@ namespace IsogridGenerator.UI
             var error = _inputs.Validate();
             if (error != null)
             {
-                MessageBox.Show(error, "Isogrid Generator \u2014 Validation Error",
+                MessageBox.Show(error, "Isogrid Generator — Validation Error",
                     MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
 
-            // If a preview sketch exists, select it so FeatureCut4 (UseAutoSelect=true)
-            // picks it up directly — no need to redraw the sketch from scratch.
-            // SolidWorks absorbs the sketch into the cut, so we null the reference
-            // without calling ClearPreview() (which would delete an already-consumed sketch).
-            if (_previewFeature != null)
-            {
-                try
-                {
-                    _doc.ClearSelection2(true);
-                    _previewFeature.Select2(false, 0);
-
-                    var fb      = new FeatureBuilder(_doc);
-                    var feature = fb.CutExtrude(_inputs.ToSiParameters().D);
-
-                    if (feature != null)
-                    {
-                        feature.Name    = "Isogrid Generator";
-                        _previewFeature = null;
-                        return;
-                    }
-                }
-                catch { }
-
-                // Sketch couldn't be reused — clear it and fall through to fresh run.
-                ClearPreview();
-            }
+            // Clear the wire-body preview before modifying the document, so there are
+            // no stale graphics overlays during the feature creation.
+            ClearPreview();
 
             try
             {
